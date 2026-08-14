@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8" />
+  <title>Lens</title>
+  <style>
+    body {
+      font-family: system-ui, sans-serif;
+      margin: 0;
+      padding: 12px;
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+      box-sizing: border-box;
+    }
+    /* the little status line telling you what Lens can currently see */
+    #status {
+      font-size: 12px;
+      color: #666;
+      padding-bottom: 8px;
+      border-bottom: 1px solid #eee;
+      margin-bottom: 8px;
+    }
+    /* the scrollable area where chat messages appear */
+    #messages {
+      flex: 1;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .msg { padding: 8px 10px; border-radius: 8px; max-width: 90%; }
+    .msg.user { align-self: flex-end; background: #dbeafe; } /* your questions, right-aligned */
+    .msg.lens { align-self: flex-start; background: #f1f1f1; } /* Lens's answers, left-aligned */
+    #inputRow { display: flex; gap: 6px; margin-top: 8px; }
+    #question { flex: 1; padding: 8px; }
+    button { padding: 8px 12px; cursor: pointer; }
+  </style>
+</head>
+<body>
+  <div id="status">🔒 Lens hasn't read this page yet — ask a question to begin.</div>
+  <div id="messages"></div>
+  <div id="inputRow">
+    <input id="question" type="text" placeholder="Ask about this page..." />
+    <button id="askBtn">Ask</button>
+  </div>
+  <script src="sidepanel.js"></script>
+</body>
+</html>
+
+<!--The <style> block is plain CSS — nothing extension-specific, just layout. flex-direction: column + height: 100vh makes the panel fill the available height with the message list which is scrollable and pinned to the bottom.
+#status — this is the privacy indicator, the visible text that tells the user what Lens is currently doing. It'll update dynamically (done in sidepanel.js).
+.msg.user vs .msg.lens — 2 different bubble styles so my questions and Lens's answers are visually different, to resemble a normal chat app.
+<script src="sidepanel.js"> — this line is VIP, it loads the JavaScript file that actually makes the buttons work — HTML alone can't capture page content or talk to your backend.-->
