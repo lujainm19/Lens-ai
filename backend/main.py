@@ -51,39 +51,48 @@ class PageContext(BaseModel):
 class AskRequest(BaseModel):
     question: str
     context: PageContext
+    history: list[dict] = []
+    # a list of past {question, answer} pairs from this session
+    # "= []" means it's optional, if the extension doesn't send it, it just defaults to empty
+    # this is what lets Lens understand follow-up questions like "what about that?"
 
 
 # Turns the question + context into a single text prompt to send to the AI model
-def build_prompt(req: AskRequest, sources: list[dict]) -> str: # this function now takes a second argument: the list of search results (can be empty)
-
+def build_prompt(req: AskRequest, sources: list[dict]) -> str:
     focus = req.context.selectedText or req.context.pageText
-    # this use selectedText if it's selected, otherwise all pageText
+    # prefer highlighted text if there is any, otherwise use the whole page's text
 
-    sources_text = "" # start with an empty string, if there are no sources, nothing extra gets added to the prompt
+    history_text = "" # stays empty if there's no prior conversation so nothing extra gets added to the prompt
 
-    if sources: # this block only runs if the sources list actually has something in it
+    if req.history: # this block only runs if history actually has entries in it
+        history_text = "\n\nPrevious conversation:\n" + "\n".join(
+            f"Q: {turn['question']}\nA: {turn['answer']}"
+            # rebuilds each past exchange as "Q: ... / A: ..." so the model can read it like a transcript
+            for turn in req.history # loops over every {question, answer} pair sent from the extension
+        )
+
+    sources_text = ""
+    if sources:
         sources_text = "\n\nWeb sources found:\n" + "\n".join(
             f"- {s['title']} ({s['url']}): {s['snippet'][:300]}"
-            # builds one line per source
-            # [:300] slices the string down to its first 300 characters, so not overloading the prompt
-            for s in sources # loop over every source dict in the list
+            for s in sources
         )
-        # "\n".join(...) glues all those lines together with newlines between them
 
     return (
-        f"Page: {req.context.title} ({req.context.url})\n\n" # tells the model which page this question is about
-
-        f"Relevant content:\n{focus}" # gives the model the actual text to read (selected text or full page)
-
-        f"{sources_text}\n\n" # inserts the web sources block we built above, empty string if there were none
-
-        f"Question: {req.question}\n\n" # the user's literal question
-
-        "Answer using the page content and, if provided, the web sources "
-        "above. If you use a web source, cite it by name with its URL. "
-        "If you're unsure or don't have enough information, say so clearly "
-        "rather than guessing."
-        # instructions/ prompt telling the model how to answer (cite sources, don't make things up)
+        f"Page: {req.context.title} ({req.context.url})\n\n"
+        f"Relevant content:\n{focus}"
+        f"{history_text}"
+        # inserts the conversation history block right after the page content
+        f"{sources_text}\n\n"
+        f"Question: {req.question}\n\n"
+        "Answer using the page content, the previous conversation, and, if "
+        "provided, the web sources above. If the question refers back to "
+        "something discussed earlier (like 'what about...' or 'and that?'), "
+        "use the previous conversation to understand what it's referring to. "
+        "If you use a web source, cite it by name with its URL. If you're "
+        "unsure or don't have enough information, say so clearly rather "
+        "than guessing."
+        # the new middle sentence specifically tells the model how to use history — without this instruction, it might ignore the history block even though it's in the prompt
     )
 
 
