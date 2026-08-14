@@ -1,5 +1,7 @@
-fastapi
+fastapi 
 uvicorn
 pydantic
 ollama
 anthropic
+python-dotenv
+requests

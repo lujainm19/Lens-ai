@@ -13,6 +13,16 @@ from fastapi import FastAPI  # the web framework that turns this file into a run
 from fastapi.middleware.cors import CORSMiddleware  # lets the Chrome extension (a different "origin") talk to this server
 from pydantic import BaseModel  # used to define the exact shape of data we expect to receive
 
+import requests  # simple, well-known library for making HTTP calls (used to call Tavily's API)
+from dotenv import load_dotenv  # reads variables out of the .env file
+
+load_dotenv()  # actually loads .env into the environment when the app starts
+
+TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY")  # reads the Tavily API key, now safely from .env, not hardcoded
+
+
+
+
 app = FastAPI()  # creates the actual server application
 
 # Extensions run from a chrome-extension:// origin, browsers normally block a webpage/extension from calling a server on a different origin unless
@@ -44,16 +54,59 @@ class AskRequest(BaseModel):
 
 
 # Turns the question + context into a single text prompt to send to the AI model
-def build_prompt(req: AskRequest) -> str:
-    # prefer the highlighted text if there is any, otherwise use the whole page's text
+def build_prompt(req: AskRequest, sources: list[dict]) -> str: # this function now takes a second argument: the list of search results (can be empty)
+
     focus = req.context.selectedText or req.context.pageText
+    # this use selectedText if it's selected, otherwise all pageText
+
+    sources_text = "" # start with an empty string, if there are no sources, nothing extra gets added to the prompt
+
+    if sources: # this block only runs if the sources list actually has something in it
+        sources_text = "\n\nWeb sources found:\n" + "\n".join(
+            f"- {s['title']} ({s['url']}): {s['snippet'][:300]}"
+            # builds one line per source
+            # [:300] slices the string down to its first 300 characters, so not overloading the prompt
+            for s in sources # loop over every source dict in the list
+        )
+        # "\n".join(...) glues all those lines together with newlines between them
+
     return (
-        f"Page: {req.context.title} ({req.context.url})\n\n"  # tell the model what page this is
-        f"Relevant content:\n{focus}\n\n"                       # give it the actual content to read
-        f"Question: {req.question}\n\n"                          # the user's actual question
-        "Answer using only the page content above unless you need to say "
-        "you're unsure."  # instruction so the model doesn't just make things up
+        f"Page: {req.context.title} ({req.context.url})\n\n" # tells the model which page this question is about
+
+        f"Relevant content:\n{focus}" # gives the model the actual text to read (selected text or full page)
+
+        f"{sources_text}\n\n" # inserts the web sources block we built above, empty string if there were none
+
+        f"Question: {req.question}\n\n" # the user's literal question
+
+        "Answer using the page content and, if provided, the web sources "
+        "above. If you use a web source, cite it by name with its URL. "
+        "If you're unsure or don't have enough information, say so clearly "
+        "rather than guessing."
+        # instructions/ prompt telling the model how to answer (cite sources, don't make things up)
     )
+
+
+def search_web(query: str) -> list[dict]:
+    """Searches the web via Tavily and returns a short list of results with
+    titles, URLs, and snippets — these become the 'sources' Lens can cite."""
+    if not TAVILY_API_KEY:
+        return []  # if no key is set, just skip search instead of crashing
+
+    response = requests.post(
+        "https://api.tavily.com/search",
+        json={
+            "api_key": TAVILY_API_KEY,
+            "query": query,
+            "max_results": 4,  # this caps the results to 4, keeping it small and short (just need a few good sources, not 20)
+        },
+    )
+    data = response.json()  # .json() converts Tavily's raw response text into a Python dictionary we can work with
+    return [
+        {"title": r["title"], "url": r["url"], "snippet": r["content"]} # for each result Tavily gave us, keep only the 3 fields we actually need
+        for r in data.get("results", []) # .get("results", []) means: use data["results"] if it exists, otherwise use an empty list
+        # this prevents a crash if Tavily's response is ever malformed or empty
+    ]
 
 
 # Sends the prompt to a LOCAL model running via Ollama (no internet, no API key, $0 cost)
@@ -80,18 +133,29 @@ def ask_anthropic(prompt: str) -> str:
 
 # This is the actual API endpoint — sidepanel.js calls POST http://localhost:8000/ask
 @app.post("/ask")
-def ask(req: AskRequest):  # FastAPI automatically parses the incoming JSON into an AskRequest object
-    prompt = build_prompt(req)  # turn the question+context into one prompt string
+def ask(req: AskRequest):
+    needs_search = any(
+        phrase in req.question.lower() # .lower() converts the question to lowercase so "True" and "true" both match
+        for phrase in ["true", "who is", "more about", "verify", "fact", "accurate", "real"] # checks if any of these words/phrases appear anywhere in the question
+    )# any(...) returns True the moment ONE of these checks matches, otherwise False
 
-    if LLM_PROVIDER == "anthropic":  # check which provider is configured
+    search_query = f"{req.context.title} {req.question}"  # combine the page's topic with the question so Tavily has real context
+    sources = search_web(search_query) if needs_search else []
+    # only call Tavily (and use a search credit) if the question seems like it might need a fact check or extra sources; otherwise, skip the search and return an empty list
+
+    prompt = build_prompt(req, sources)  # to build the final prompt text, now including sources if there are any
+
+    if LLM_PROVIDER == "anthropic":
         answer = ask_anthropic(prompt)
     else:
-        answer = ask_ollama(prompt)  # defaults to local/free
+        answer = ask_ollama(prompt)
 
-    # Context is used for this single call only. nothing is stored here, no database, no file write, no logging of page content.
-    return {"answer": answer}  # FastAPI automatically converts this dict into a JSON response
+    return {"answer": answer, "sources": sources}
+    # now returns both the answer text and the raw list of sources, the extension can use "sources" later to render clickable links
 
-# This is the actual "brain" of Lens: a small server that receives the question + page context from your extension, 
+
+
+# This file is the actual "brain" of Lens: a small server that receives the question + page context from your extension, 
 # builds a prompt, sends it to an AI model (Ollama running locally, or a cloud API if you switch it), and sends the answer back. 
 # This is also where the API key (if using a cloud provider) stays hidden, so the extension never talks to an AI provider directly.
 # The extension never contacts an AI provider on its own, it only ever calls this backend, which builds a proper prompt, asks the model, and hands back a plain answer.
