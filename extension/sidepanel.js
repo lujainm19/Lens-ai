@@ -9,6 +9,30 @@ const messagesEl = document.getElementById("messages"); // the scrollable box wh
 const questionEl = document.getElementById("question"); // the text input box where you type your question
 const askBtn = document.getElementById("askBtn");       // the "Ask" button
 
+// Runs once when the side panel loads/opens, checks if a highlight-to-ask action just happened, and if so automatically sends that question
+async function checkForPendingQuestion() {
+  const { pendingQuestion } = await chrome.storage.local.get("pendingQuestion");
+  // reads whatever background.js may have stashed, undefined if nothing's there
+
+  if (pendingQuestion) {
+    questionEl.value = `Explain this: "${pendingQuestion}"`;
+    // pre-fills the input box with a natural question wrapping the highlighted text
+
+    await chrome.storage.local.remove("pendingQuestion"); // clears it immediately so it doesn't get reused if the panel reloads later
+
+    askLens(); // automatically send it (no need for the user to also click "Ask")
+  }
+}
+
+checkForPendingQuestion();// call this once right when the panel's script loads
+
+
+
+// keeps track of the conversation so far in this session, so follow-up questions make sense
+// lives only in memory, clears if you close the panel or reload, nothing saved to disk
+// each entry looks like: { question: "...", answer: "..." }
+let conversationHistory = [];
+
 // Adds one chat bubble to the message list
 function addMessage(text, who) {
   const div = document.createElement("div");     // create a new empty <div> element in memory (not on screen yet)
@@ -54,14 +78,31 @@ async function askLens() {
     const res = await fetch(BACKEND_URL, {        // sends an HTTP request to your backend
       method: "POST",                              // POST because we're sending data, not just requesting a page
       headers: { "Content-Type": "application/json" }, // tells the backend the body is JSON
-      body: JSON.stringify({ question, context })  // converts the question + context object into a JSON string to send
+      body: JSON.stringify({
+        question,
+        context,
+        history: conversationHistory  // sends everything asked so far in this session, so the backend can understand follow-ups
+      })
     });
 
     const data = await res.json();          // parses the backend's response body as JSON
     addMessage(data.answer ?? "No answer returned.", "lens"); // show the answer, fall back to a message if "answer" is missing
+
+    // remembers this exchange so the NEXT question can reference it as a follow-up
+    conversationHistory.push({ question, answer: data.answer });
+
   } catch (err) {
-    // this block runs if fetch() itself fails  e.g. the backend isn't running yet
-    addMessage("Something went wrong reaching the backend.", "lens"); // show a friendly error in the chat
+    // this block runs if fetch() itself fails, OR if getPageContext() throws before we even get to fetch
+    // checks specifically for Chrome's activeTab permission error, which happens when you switch tabs
+    // without re-clicking the Lens icon there first (activeTab only grants access per-tab, on click)
+    if (err.message && err.message.includes("Cannot access contents")) {
+      addMessage(
+        "Click the Lens icon on this tab first, then ask again — Lens only reads a page after you've actively opened it there.",
+        "lens"
+      );
+    } else {
+      addMessage("Something went wrong reaching the backend.", "lens"); // show a friendly error in the chat for any other failure
+    }
     console.error(err); // log the real error to the browser console for debugging
   } finally {
     // the finally block runs whether the try succeeded or the catch triggered
@@ -75,5 +116,8 @@ questionEl.addEventListener("keydown", (e) => {
   if (e.key === "Enter") askLens();        // pressing Enter in the input box also triggers askLens, like a normal chat app
 });
 
-//listens for your question, grabs the current page's content at that exact moment (nothing before, nothing after), 
+// this filelistens for your question, grabs the current page's content at that exact moment (nothing before, nothing after), 
 // sends both to your backend, and shows the reply. Everything about when data leaves your browser is controlled right here (privacy is controlled here)
+// conversationHistory is what makes follow-up questions possible — it's the only thing "remembered" between questions,
+// and it only lives in this tab's memory, never written to disk or sent anywhere except back to your own backend
+
