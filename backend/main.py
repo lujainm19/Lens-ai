@@ -55,6 +55,8 @@ class AskRequest(BaseModel):
     # a list of past {question, answer} pairs from this session
     # "= []" means it's optional, if the extension doesn't send it, it just defaults to empty
     # this is what lets Lens understand follow-up questions like "what about that?"
+    screenshot: str | None = None
+    # the screenshot as a data URL string, sent only when "Analyze what's on screen" is clicked. None (missing) for normal text-only questions
 
 
 # Turns the question + context into a single text prompt to send to the AI model
@@ -128,6 +130,22 @@ def ask_ollama(prompt: str) -> str:
     return response["message"]["content"]  # pull just the text answer out of Ollama's response object
 
 
+def ask_ollama_vision(prompt: str, screenshot: str) -> str:
+    import ollama
+    # strips the "data:image/png;base64," prefix sinceOllama wants just the raw base64 image data, not the full data URL the browser sends
+    image_data = screenshot.split(",")[1] if "," in screenshot else screenshot
+
+    response = ollama.chat(
+        model="llava",  # the vision-capable model, different from llama3.2
+        messages=[{
+            "role": "user",
+            "content": prompt,
+            "images": [image_data]  # this is what makes it a vision request
+        }],
+    )
+    return response["message"]["content"]
+
+
 # Sends the prompt to Anthropic's cloud API instead (higher quality, costs money, needs an API key)
 def ask_anthropic(prompt: str) -> str:
     import anthropic  # pip install anthropic
@@ -146,7 +164,7 @@ def ask(req: AskRequest):
     needs_search = any(
         phrase in req.question.lower() # .lower() converts the question to lowercase so "True" and "true" both match
         for phrase in ["true", "who is", "more about", "verify", "fact", "accurate", "real"] # checks if any of these words/phrases appear anywhere in the question
-    )# any(...) returns True the moment ONE of these checks matches, otherwise False
+    )# any(...) returns True the moment 1 of these checks matches, otherwise False
 
     search_query = f"{req.context.title} {req.question}"  # combine the page's topic with the question so Tavily has real context
     sources = search_web(search_query) if needs_search else []
@@ -154,7 +172,10 @@ def ask(req: AskRequest):
 
     prompt = build_prompt(req, sources)  # to build the final prompt text, now including sources if there are any
 
-    if LLM_PROVIDER == "anthropic":
+    if req.screenshot: # a screenshot was sent, this was an "Analyze what's on screen" click
+        answer = ask_ollama_vision(prompt, req.screenshot)
+        # skips ask_anthropic/ask_ollama entirely, cuz vision always goes to llava for now, regardless of LLM_PROVIDER setting
+    elif LLM_PROVIDER == "anthropic":
         answer = ask_anthropic(prompt)
     else:
         answer = ask_ollama(prompt)
